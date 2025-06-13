@@ -1,0 +1,14 @@
+# Rust-specific
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Env
+.env
+
+# Logs
+*.log
+
+# OS-specific
+.DS_Store
+Thumbs.db
