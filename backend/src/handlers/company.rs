@@ -1,22 +1,27 @@
-use axum::{Json, Router, routing::post};
+use axum::{Router, routing::post, extract::State, Json, http::StatusCode};
 use sqlx::SqlitePool;
-use uuid::Uuid;
-use chrono::Utc;
+use serde_json::json;
 
-use crate::models::Company;
+use crate::models::company::Company;
+use crate::services::company::insert_company;
 
 pub fn routes(pool: SqlitePool) -> Router {
     Router::new()
         .route("/register", post(register_company).with_state(pool))
 }
 
-async fn register_company(
+pub async fn register_company(
+    State(pool): State<SqlitePool>,
     Json(company): Json<Company>,
-    pool: axum::extract::State<SqlitePool>,
-) -> Result<Json<Company>, String> {
-    // Insert into DB (implement in services)
-    crate::services::company::insert_company(&pool, &company)
-        .await
-        .map(Json)
-        .map_err(|e| e.to_string())
+) -> (StatusCode, Json<serde_json::Value>) {
+    match insert_company(&pool, &company).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({ "message": "Company registered successfully" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        ),
+    }
 }
