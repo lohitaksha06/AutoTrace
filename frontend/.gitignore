@@ -1,0 +1,11 @@
+node_modules/
+.pnpm-store/
+.next/
+dist/
+out/
+pnpm-lock.yaml
+npm-debug.log*
+pnpm-debug.log*
+yarn-*.log*
+.env*
+!.env.example
