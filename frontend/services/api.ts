@@ -35,7 +35,7 @@ export type CreateVehicleResponse = {
   metadata?: Record<string, unknown>;
   createdAt: string;
   merkleRoot: string | null;
-  merkleUpdatedAt: string;
+  merkleUpdatedAt: string | null;
 };
 
 export function createVehicle(input: CreateVehicleInput) {
@@ -43,6 +43,30 @@ export function createVehicle(input: CreateVehicleInput) {
     method: "POST",
     body: input,
   });
+}
+
+export type VehicleSummary = {
+  id: string;
+  vin: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  merkleRoot: string | null;
+  merkleUpdatedAt: string | null;
+  logCount: number;
+  lastLog: null | {
+    id: string;
+    summary: string;
+    createdAt: string;
+    status: string;
+    hash: string;
+    docCid: string | null;
+    mileage: number | null;
+  };
+};
+
+export function listVehicles(limit?: number) {
+  const params = typeof limit === "number" ? `?limit=${limit}` : "";
+  return apiFetch<{ items: VehicleSummary[] }>(`/api/vehicles${params}`);
 }
 
 export type CreateLogInput = {
@@ -84,4 +108,52 @@ export type VerifyLogResponse = {
 export function verifyLog(vehicleId: string, logId: string) {
   const params = new URLSearchParams({ logId });
   return apiFetch<VerifyLogResponse>(`/api/vehicles/${vehicleId}/verify?${params.toString()}`);
+}
+
+export type VehicleLog = {
+  id: string;
+  summary: string;
+  parts: string[];
+  mileage: number;
+  docCid: string | null;
+  createdAt: string;
+  previousHash: string | null;
+  hash: string;
+  status: string;
+};
+
+export type VehicleDetailResponse = {
+  vehicle: {
+    id: string;
+    vin: string;
+    metadata: Record<string, unknown>;
+    createdAt: string;
+    merkleRoot: string | null;
+    merkleUpdatedAt: string | null;
+  };
+  logs: VehicleLog[];
+};
+
+export function getVehicleDetail(vehicleId: string) {
+  return apiFetch<VehicleDetailResponse>(`/api/vehicles/${vehicleId}`);
+}
+
+export type ActivityItem = {
+  id: string;
+  summary: string;
+  mileage: number;
+  createdAt: string;
+  status: string;
+  hash: string;
+  docCid: string | null;
+  vehicle: {
+    id: string;
+    vin: string;
+    metadata: Record<string, unknown>;
+  };
+};
+
+export function getRecentActivity(limit?: number) {
+  const params = typeof limit === "number" ? `?limit=${limit}` : "";
+  return apiFetch<{ items: ActivityItem[] }>(`/api/activity${params}`);
 }

@@ -1,6 +1,106 @@
 import Link from "next/link";
-import { FormEvent, useState } from "react";
-import { createServiceLog, createVehicle, verifyLog } from "../services/api";
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import {
+  ActivityItem,
+  VehicleLog,
+  VehicleSummary,
+  createServiceLog,
+  createVehicle,
+  getRecentActivity,
+  getVehicleDetail,
+  listVehicles,
+  verifyLog,
+} from "../services/api";
+
+const RTF = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+
+const RELATIVE_UNITS: Array<{ unit: Intl.RelativeTimeFormatUnit; seconds: number }> = [
+  { unit: "year", seconds: 60 * 60 * 24 * 365 },
+  { unit: "month", seconds: 60 * 60 * 24 * 30 },
+  { unit: "week", seconds: 60 * 60 * 24 * 7 },
+  { unit: "day", seconds: 60 * 60 * 24 },
+  { unit: "hour", seconds: 60 * 60 },
+  { unit: "minute", seconds: 60 },
+  { unit: "second", seconds: 1 },
+];
+
+const numberFormatter = new Intl.NumberFormat();
+
+function formatNumber(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) return "0";
+  return numberFormatter.format(value);
+}
+
+function formatRelativeTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  let diffSeconds = Math.round((date.getTime() - Date.now()) / 1000);
+  for (const { unit, seconds } of RELATIVE_UNITS) {
+    if (Math.abs(diffSeconds) >= seconds || unit === "second") {
+      const value = Math.round(diffSeconds / seconds);
+      return RTF.format(value, unit);
+    }
+  }
+  return "just now";
+}
+
+function truncateVin(vin: string): string {
+  if (!vin) return "—";
+  return vin.length > 12 ? `${vin.slice(0, 12)}…` : vin;
+}
+
+function metadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
+  if (!metadata) return undefined;
+  const value = metadata[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function describeVehicle(metadata: Record<string, unknown> | undefined): string {
+  if (!metadata) return "Vehicle";
+  const make = metadataString(metadata, "make");
+  const model = metadataString(metadata, "model");
+  const yearValue = metadata["year"];
+  const year =
+    typeof yearValue === "number"
+      ? String(yearValue)
+      : typeof yearValue === "string"
+      ? yearValue
+      : undefined;
+  const name = [make, model].filter(Boolean).join(" ");
+  return [year, name].filter(Boolean).join(" ") || make || "Vehicle";
+}
+
+function statusBadge(status: string | null | undefined) {
+  const normalized = (status ?? "").toUpperCase();
+  switch (normalized) {
+    case "ON_CHAIN":
+      return {
+        label: "On-chain",
+        className:
+          "text-emerald-500 text-xs px-2 py-1 rounded border border-emerald-500/30 bg-emerald-500/10",
+      };
+    case "PENDING":
+    case "LOCAL":
+      return {
+        label: "Pending",
+        className:
+          "text-amber-500 text-xs px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10",
+      };
+    case "FAILED":
+      return {
+        label: "Failed",
+        className:
+          "text-red-500 text-xs px-2 py-1 rounded border border-red-500/30 bg-red-500/10",
+      };
+    default:
+      return {
+        label: status ?? "Unknown",
+        className:
+          "text-muted text-xs px-2 py-1 rounded border border-[#2a2a2f] bg-[#16161a]",
+      };
+  }
+}
 
 export default function Dashboard() {
   const [vehicleVin, setVehicleVin] = useState("");
@@ -22,6 +122,90 @@ export default function Dashboard() {
   const [verifyProof, setVerifyProof] = useState<Array<{ pos: "L" | "R"; hash: string }> | null>(null);
   const [verifyLoading, setVerifyLoading] = useState(false);
 
+  const [vehicles, setVehicles] = useState<VehicleSummary[]>([]);
+  const [recentActivity, setRecentActivity] = useState<ActivityItem[]>([]);
+  const [verifyLogs, setVerifyLogs] = useState<VehicleLog[]>([]);
+  const [verifyLogsLoading, setVerifyLogsLoading] = useState(false);
+  const [verifyLogsError, setVerifyLogsError] = useState<string | null>(null);
+  const [verifyRefreshKey, setVerifyRefreshKey] = useState(0);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [loadingData, setLoadingData] = useState(true);
+
+  const refreshDashboardData = useCallback(async () => {
+    const [vehicleRes, activityRes] = await Promise.all([listVehicles(), getRecentActivity()]);
+    setVehicles(vehicleRes.items);
+    setRecentActivity(activityRes.items);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoadingData(true);
+      try {
+        await refreshDashboardData();
+        if (!cancelled) setDataError(null);
+      } catch (err) {
+        if (!cancelled) setDataError((err as Error).message);
+      } finally {
+        if (!cancelled) setLoadingData(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshDashboardData]);
+
+  useEffect(() => {
+    if (vehicles.length === 0) {
+      setLogVehicleId("");
+      setVerifyVehicleId("");
+      setVerifyLogs([]);
+      setVerifyLogId("");
+      return;
+    }
+    setLogVehicleId((current) => current || vehicles[0].id);
+    setVerifyVehicleId((current) => current || vehicles[0].id);
+  }, [vehicles]);
+
+  useEffect(() => {
+    if (!verifyVehicleId) {
+      setVerifyLogs([]);
+      setVerifyLogId("");
+      setVerifyLogsError(null);
+      return;
+    }
+    let cancelled = false;
+    setVerifyLogsLoading(true);
+    setVerifyLogsError(null);
+    getVehicleDetail(verifyVehicleId)
+      .then((detail) => {
+        if (cancelled) return;
+        setVerifyLogs(detail.logs);
+        if (detail.logs.length > 0) {
+          setVerifyLogId((prev) =>
+            prev && detail.logs.some((log) => log.id === prev) ? prev : detail.logs[0].id
+          );
+        } else {
+          setVerifyLogId("");
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setVerifyLogs([]);
+        setVerifyLogId("");
+        setVerifyLogsError((err as Error).message);
+      })
+      .finally(() => {
+        if (!cancelled) setVerifyLogsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [verifyVehicleId, verifyRefreshKey]);
+
+  const totalVehicles = vehicles.length;
+  const totalLogs = vehicles.reduce((sum, vehicle) => sum + (vehicle.logCount ?? 0), 0);
+
   const handleVehicleSubmit = async (evt: FormEvent<HTMLFormElement>) => {
     evt.preventDefault();
     if (!vehicleVin.trim()) {
@@ -38,6 +222,12 @@ export default function Dashboard() {
       setVehicleMessage(`Vehicle created. ID: ${res.id}`);
       setVehicleVin("");
       setVehicleMake("");
+      try {
+        await refreshDashboardData();
+        setDataError(null);
+      } catch (refreshErr) {
+        setDataError((refreshErr as Error).message);
+      }
     } catch (err) {
       setVehicleMessage((err as Error).message);
     } finally {
@@ -81,6 +271,15 @@ export default function Dashboard() {
       setLogMileage("");
       setLogParts("");
       setLogDocCid("");
+      try {
+        await refreshDashboardData();
+        setDataError(null);
+      } catch (refreshErr) {
+        setDataError((refreshErr as Error).message);
+      }
+      if (logVehicleId.trim() && logVehicleId.trim() === verifyVehicleId.trim()) {
+        setVerifyRefreshKey((key) => key + 1);
+      }
     } catch (err) {
       setLogMessage((err as Error).message);
     } finally {
@@ -122,6 +321,12 @@ export default function Dashboard() {
         </nav>
       </header>
 
+      {dataError && (
+        <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          Failed to load dashboard data: {dataError}
+        </div>
+      )}
+
       {/* KPIs */}
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <article className="bg-[#0f0f12] border border-[#2a2a2f] rounded-xl p-4">
@@ -129,14 +334,14 @@ export default function Dashboard() {
             <span className="text-muted text-sm">Vehicles Tracked</span>
             <span className="text-emerald-500 text-xs px-2 py-1 rounded border border-emerald-500/30 bg-emerald-500/10">+18%</span>
           </div>
-          <div className="text-2xl font-bold">1,248</div>
+          <div className="text-2xl font-bold">{loadingData ? "…" : formatNumber(totalVehicles)}</div>
         </article>
         <article className="bg-[#0f0f12] border border-[#2a2a2f] rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
             <span className="text-muted text-sm">Verified Service Logs</span>
             <span className="text-emerald-500 text-xs px-2 py-1 rounded border border-emerald-500/30 bg-emerald-500/10">+6%</span>
           </div>
-          <div className="text-2xl font-bold">9,432</div>
+          <div className="text-2xl font-bold">{loadingData ? "…" : formatNumber(totalLogs)}</div>
         </article>
         <article className="bg-[#0f0f12] border border-[#2a2a2f] rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
@@ -161,10 +366,7 @@ export default function Dashboard() {
         <article className="bg-[#0f0f12] border border-[#2a2a2f] rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
             <div className="text-base font-semibold">Recent Activity</div>
-            <div className="flex gap-2">
-              <input className="flex-1 bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg placeholder:text-muted" placeholder="Search VIN, owner, or service…" />
-              <button className="border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg hover:bg-red-500/10">Filter</button>
-            </div>
+            <div className="text-xs text-muted">Latest {recentActivity.length} events</div>
           </div>
           <div className="overflow-auto">
             <table className="w-full border-collapse">
@@ -178,34 +380,39 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                <tr className="border-t border-[#2a2a2f]">
-                  <td className="px-3 py-3">2m ago</td>
-                  <td className="px-3 py-3">1HGCM82633A0…</td>
-                  <td className="px-3 py-3">Service log added (brake pads)</td>
-                  <td className="px-3 py-3">Garage X</td>
-                  <td className="px-3 py-3"><span className="text-emerald-500 text-xs px-2 py-1 rounded border border-emerald-500/30 bg-emerald-500/10">On-chain</span></td>
-                </tr>
-                <tr className="border-t border-[#2a2a2f]">
-                  <td className="px-3 py-3">18m ago</td>
-                  <td className="px-3 py-3">3CZRE38509G2…</td>
-                  <td className="px-3 py-3">Ownership transferred</td>
-                  <td className="px-3 py-3">Dealer Nova</td>
-                  <td className="px-3 py-3"><span className="text-amber-500 text-xs px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10">Pinning</span></td>
-                </tr>
-                <tr className="border-t border-[#2a2a2f]">
-                  <td className="px-3 py-3">1h ago</td>
-                  <td className="px-3 py-3">WAUZZZ8K6EA0…</td>
-                  <td className="px-3 py-3">Document uploaded (invoice.pdf)</td>
-                  <td className="px-3 py-3">Garage Prime</td>
-                  <td className="px-3 py-3"><span className="text-amber-500 text-xs px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10">Pinning</span></td>
-                </tr>
-                <tr className="border-t border-[#2a2a2f]">
-                  <td className="px-3 py-3">3h ago</td>
-                  <td className="px-3 py-3">JTDKB20U7933…</td>
-                  <td className="px-3 py-3">Dispute opened (odometer)</td>
-                  <td className="px-3 py-3">Buyer-42</td>
-                  <td className="px-3 py-3"><span className="text-red-500 text-xs px-2 py-1 rounded border border-red-500/30 bg-red-500/10">Review</span></td>
-                </tr>
+                {loadingData && recentActivity.length === 0 && (
+                  <tr className="border-t border-[#2a2a2f]">
+                    <td colSpan={5} className="px-3 py-6 text-center text-muted text-sm">
+                      Loading activity…
+                    </td>
+                  </tr>
+                )}
+                {!loadingData && recentActivity.length === 0 && (
+                  <tr className="border-t border-[#2a2a2f]">
+                    <td colSpan={5} className="px-3 py-6 text-center text-muted text-sm">
+                      No service events yet. Log your first maintenance record to populate this feed.
+                    </td>
+                  </tr>
+                )}
+                {recentActivity.map((item) => {
+                  const badge = statusBadge(item.status);
+                  const actor =
+                    metadataString(item.vehicle.metadata, "serviceCenter") ??
+                    metadataString(item.vehicle.metadata, "actor") ??
+                    metadataString(item.vehicle.metadata, "garage") ??
+                    "—";
+                  return (
+                    <tr key={item.id ?? item.hash} className="border-t border-[#2a2a2f]">
+                      <td className="px-3 py-3">{formatRelativeTime(item.createdAt)}</td>
+                      <td className="px-3 py-3">{truncateVin(item.vehicle.vin)}</td>
+                      <td className="px-3 py-3">{item.summary}</td>
+                      <td className="px-3 py-3">{actor}</td>
+                      <td className="px-3 py-3">
+                        <span className={badge.className}>{badge.label}</span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -250,13 +457,29 @@ export default function Dashboard() {
             <div className="text-base font-semibold mb-3">Add Service Log</div>
             <form className="grid gap-2" onSubmit={handleLogSubmit}>
               <label className="grid gap-1 text-sm">
-                <span className="text-muted">Vehicle ID</span>
-                <input
-                  className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
-                  value={logVehicleId}
-                  onChange={(e) => setLogVehicleId(e.target.value)}
-                  required
-                />
+                <span className="text-muted">Vehicle</span>
+                {vehicles.length > 0 ? (
+                  <select
+                    className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
+                    value={logVehicleId}
+                    onChange={(e) => setLogVehicleId(e.target.value)}
+                    required
+                  >
+                    {vehicles.map((vehicle) => (
+                      <option key={vehicle.id} value={vehicle.id}>
+                        {truncateVin(vehicle.vin)} · {describeVehicle(vehicle.metadata)}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
+                    value={logVehicleId}
+                    onChange={(e) => setLogVehicleId(e.target.value)}
+                    placeholder="Vehicle ID"
+                    required
+                  />
+                )}
               </label>
               <label className="grid gap-1 text-sm">
                 <span className="text-muted">Summary</span>
@@ -297,7 +520,7 @@ export default function Dashboard() {
               <button
                 className="bg-accent text-white px-3 py-2 rounded-lg hover:bg-red-500/90 disabled:opacity-50"
                 type="submit"
-                disabled={logLoading}
+                disabled={logLoading || !logVehicleId.trim()}
               >
                 {logLoading ? "Submitting…" : "Submit Log"}
               </button>
@@ -305,33 +528,75 @@ export default function Dashboard() {
             {logMessage && (
               <div className="text-sm mt-2 text-muted leading-snug">{logMessage}</div>
             )}
+            {!logVehicleId && vehicles.length === 0 && (
+              <div className="text-xs text-muted mt-2">Register a vehicle first to enable logging.</div>
+            )}
           </div>
 
           <div>
             <div className="text-base font-semibold mb-3">Verify Log</div>
             <form className="grid gap-2" onSubmit={handleVerifySubmit}>
               <label className="grid gap-1 text-sm">
-                <span className="text-muted">Vehicle ID</span>
-                <input
-                  className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
-                  value={verifyVehicleId}
-                  onChange={(e) => setVerifyVehicleId(e.target.value)}
-                  required
-                />
+                <span className="text-muted">Vehicle</span>
+                {vehicles.length > 0 ? (
+                  <select
+                    className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
+                    value={verifyVehicleId}
+                    onChange={(e) => setVerifyVehicleId(e.target.value)}
+                    required
+                  >
+                    {vehicles.map((vehicle) => (
+                      <option key={vehicle.id} value={vehicle.id}>
+                        {truncateVin(vehicle.vin)} · {describeVehicle(vehicle.metadata)}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
+                    value={verifyVehicleId}
+                    onChange={(e) => setVerifyVehicleId(e.target.value)}
+                    placeholder="Vehicle ID"
+                    required
+                  />
+                )}
               </label>
               <label className="grid gap-1 text-sm">
-                <span className="text-muted">Log ID</span>
-                <input
-                  className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
-                  value={verifyLogId}
-                  onChange={(e) => setVerifyLogId(e.target.value)}
-                  required
-                />
+                <span className="text-muted">Log</span>
+                {verifyLogs.length > 0 ? (
+                  <select
+                    className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
+                    value={verifyLogId}
+                    onChange={(e) => setVerifyLogId(e.target.value)}
+                    required
+                  >
+                    {verifyLogs.map((log) => (
+                      <option key={log.id} value={log.id}>
+                        {new Date(log.createdAt).toLocaleString()} · {log.summary}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
+                    value={verifyLogId}
+                    onChange={(e) => setVerifyLogId(e.target.value)}
+                    placeholder="Log ID"
+                    required
+                    disabled={verifyLogsLoading}
+                  />
+                )}
               </label>
+              {verifyLogsLoading && (
+                <div className="text-xs text-muted">Loading logs…</div>
+              )}
+              {verifyLogsError && (
+                <div className="text-xs text-red-400">{verifyLogsError}</div>
+              )}
               <button
                 className="border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg hover:bg-red-500/10 disabled:opacity-50"
                 type="submit"
-                disabled={verifyLoading}
+                disabled={verifyLoading || !verifyVehicleId || !verifyLogId}
               >
                 {verifyLoading ? "Verifying…" : "Verify"}
               </button>
@@ -351,6 +616,11 @@ export default function Dashboard() {
                 </ul>
               </div>
             )}
+            {verifyLogs.length === 0 && !verifyLogsLoading && verifyVehicleId && (
+              <div className="mt-2 text-xs text-muted">
+                No logs found for this vehicle yet.
+              </div>
+            )}
           </div>
         </aside>
       </section>
@@ -364,18 +634,29 @@ export default function Dashboard() {
           <Link className="text-accent font-semibold hover:text-red-400" href="#">View all →</Link>
         </div>
         <div className="grid gap-2">
-          <div className="flex justify-between text-sm">
-            <span>VIN 1HGCM82633A0… • Honda Accord • 2019</span>
-            <span className="text-muted">9 logs • last: 2m</span>
-          </div>
-          <div className="flex justify-between text-sm">
-            <span>VIN WAUZZZ8K6EA0… • Audi A4 • 2014</span>
-            <span className="text-muted">22 logs • last: 1h</span>
-          </div>
-          <div className="flex justify-between text-sm">
-            <span>VIN JTDKB20U7933… • Toyota Prius • 2009</span>
-            <span className="text-muted">15 logs • last: 3h</span>
-          </div>
+          {loadingData && vehicles.length === 0 && (
+            <div className="text-sm text-muted">Loading vehicles…</div>
+          )}
+          {!loadingData && vehicles.length === 0 && (
+            <div className="text-sm text-muted">
+              No vehicles registered yet. Use the form above to create one.
+            </div>
+          )}
+          {vehicles.map((vehicle) => {
+            const lastLogText = vehicle.lastLog
+              ? formatRelativeTime(vehicle.lastLog.createdAt)
+              : "—";
+            return (
+              <div key={vehicle.id} className="flex justify-between text-sm">
+                <span>
+                  VIN {truncateVin(vehicle.vin)} • {describeVehicle(vehicle.metadata)}
+                </span>
+                <span className="text-muted">
+                  {formatNumber(vehicle.logCount)} logs • last: {lastLogText}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </section>
     </main>
