@@ -6,6 +6,17 @@ type FetchOptions = {
   body?: any;
 };
 
+function buildQuery(params?: Record<string, string | number | undefined | null>): string {
+  if (!params) return "";
+  const searchParams = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    searchParams.set(key, String(value));
+  });
+  const query = searchParams.toString();
+  return query ? `?${query}` : "";
+}
+
 async function apiFetch<T>(path: string, options: FetchOptions = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: options.method ?? "GET",
@@ -61,12 +72,31 @@ export type VehicleSummary = {
     hash: string;
     docCid: string | null;
     mileage: number | null;
+    performedBy: string | null;
+    metadata: Record<string, unknown>;
   };
 };
 
-export function listVehicles(limit?: number) {
-  const params = typeof limit === "number" ? `?limit=${limit}` : "";
-  return apiFetch<{ items: VehicleSummary[] }>(`/api/vehicles${params}`);
+export type Pagination = {
+  page: number;
+  perPage: number;
+  total: number;
+  totalPages: number;
+};
+
+export type ListVehiclesParams = {
+  page?: number;
+  perPage?: number;
+  search?: string;
+};
+
+export type ListVehiclesResponse = {
+  items: VehicleSummary[];
+  pagination: Pagination;
+};
+
+export function listVehicles(params?: ListVehiclesParams) {
+  return apiFetch<ListVehiclesResponse>(`/api/vehicles${buildQuery(params)}`);
 }
 
 export type CreateLogInput = {
@@ -75,6 +105,8 @@ export type CreateLogInput = {
   parts?: string[];
   mileage: number;
   docCid?: string;
+  performedBy?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type CreateLogResponse = {
@@ -83,6 +115,7 @@ export type CreateLogResponse = {
   previousHash: string | null;
   merkleRoot: string | null;
   createdAt: string;
+  performedBy: string | null;
 };
 
 export function createServiceLog(input: CreateLogInput) {
@@ -93,6 +126,8 @@ export function createServiceLog(input: CreateLogInput) {
       parts: input.parts,
       mileage: input.mileage,
       docCid: input.docCid,
+      performedBy: input.performedBy,
+      metadata: input.metadata,
     },
   });
 }
@@ -116,6 +151,8 @@ export type VehicleLog = {
   parts: string[];
   mileage: number;
   docCid: string | null;
+  performedBy: string | null;
+  metadata: Record<string, unknown>;
   createdAt: string;
   previousHash: string | null;
   hash: string;
@@ -146,6 +183,8 @@ export type ActivityItem = {
   status: string;
   hash: string;
   docCid: string | null;
+  performedBy: string | null;
+  metadata: Record<string, unknown>;
   vehicle: {
     id: string;
     vin: string;
@@ -153,7 +192,20 @@ export type ActivityItem = {
   };
 };
 
-export function getRecentActivity(limit?: number) {
-  const params = typeof limit === "number" ? `?limit=${limit}` : "";
-  return apiFetch<{ items: ActivityItem[] }>(`/api/activity${params}`);
+export type ActivityQuery = {
+  page?: number;
+  perPage?: number;
+  status?: string;
+  search?: string;
+  vin?: string;
+  vehicleId?: string;
+};
+
+export type ActivityResponse = {
+  items: ActivityItem[];
+  pagination: Pagination;
+};
+
+export function getRecentActivity(params?: ActivityQuery) {
+  return apiFetch<ActivityResponse>(`/api/activity${buildQuery(params)}`);
 }

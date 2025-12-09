@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import {
   ActivityItem,
+  Pagination,
   VehicleLog,
   VehicleSummary,
   createServiceLog,
@@ -102,6 +103,11 @@ function statusBadge(status: string | null | undefined) {
   }
 }
 
+const VEHICLES_PER_PAGE = 5;
+const ACTIVITY_PER_PAGE = 10;
+const ACTIVITY_STATUS_OPTIONS = ["all", "ON_CHAIN", "PENDING", "LOCAL", "FAILED"] as const;
+type ActivityStatusFilter = (typeof ACTIVITY_STATUS_OPTIONS)[number];
+
 export default function Dashboard() {
   const [vehicleVin, setVehicleVin] = useState("");
   const [vehicleMake, setVehicleMake] = useState("");
@@ -113,6 +119,7 @@ export default function Dashboard() {
   const [logMileage, setLogMileage] = useState("");
   const [logParts, setLogParts] = useState("");
   const [logDocCid, setLogDocCid] = useState("");
+  const [logPerformedBy, setLogPerformedBy] = useState("");
   const [logMessage, setLogMessage] = useState<string | null>(null);
   const [logLoading, setLogLoading] = useState(false);
 
@@ -123,37 +130,93 @@ export default function Dashboard() {
   const [verifyLoading, setVerifyLoading] = useState(false);
 
   const [vehicles, setVehicles] = useState<VehicleSummary[]>([]);
+  const [vehiclePage, setVehiclePage] = useState(1);
+  const [vehicleSearch, setVehicleSearch] = useState("");
+  const [vehiclePagination, setVehiclePagination] = useState<Pagination | null>(null);
+  const [vehiclesLoading, setVehiclesLoading] = useState(true);
+  const [vehiclesError, setVehiclesError] = useState<string | null>(null);
+  const [vehiclesRefreshKey, setVehiclesRefreshKey] = useState(0);
+
   const [recentActivity, setRecentActivity] = useState<ActivityItem[]>([]);
+  const [activityPage, setActivityPage] = useState(1);
+  const [activitySearch, setActivitySearch] = useState("");
+  const [activityStatus, setActivityStatus] = useState<ActivityStatusFilter>("all");
+  const [activityPagination, setActivityPagination] = useState<Pagination | null>(null);
+  const [activityLoading, setActivityLoading] = useState(true);
+  const [activityError, setActivityError] = useState<string | null>(null);
+  const [activityRefreshKey, setActivityRefreshKey] = useState(0);
+
   const [verifyLogs, setVerifyLogs] = useState<VehicleLog[]>([]);
   const [verifyLogsLoading, setVerifyLogsLoading] = useState(false);
   const [verifyLogsError, setVerifyLogsError] = useState<string | null>(null);
   const [verifyRefreshKey, setVerifyRefreshKey] = useState(0);
-  const [dataError, setDataError] = useState<string | null>(null);
-  const [loadingData, setLoadingData] = useState(true);
-
-  const refreshDashboardData = useCallback(async () => {
-    const [vehicleRes, activityRes] = await Promise.all([listVehicles(), getRecentActivity()]);
-    setVehicles(vehicleRes.items);
-    setRecentActivity(activityRes.items);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      setLoadingData(true);
-      try {
-        await refreshDashboardData();
-        if (!cancelled) setDataError(null);
-      } catch (err) {
-        if (!cancelled) setDataError((err as Error).message);
-      } finally {
-        if (!cancelled) setLoadingData(false);
-      }
-    })();
+    setVehiclesLoading(true);
+    listVehicles({
+      page: vehiclePage,
+      perPage: VEHICLES_PER_PAGE,
+      search: vehicleSearch || undefined,
+    })
+      .then((response) => {
+        if (cancelled) return;
+        setVehicles(response.items);
+        setVehiclePagination(response.pagination);
+        setVehiclesError(null);
+        if (response.pagination.page !== vehiclePage) {
+          setVehiclePage(response.pagination.page);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setVehicles([]);
+        setVehiclePagination(null);
+        setVehiclesError((err as Error).message);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setVehiclesLoading(false);
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, [refreshDashboardData]);
+  }, [vehiclePage, vehicleSearch, vehiclesRefreshKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setActivityLoading(true);
+    getRecentActivity({
+      page: activityPage,
+      perPage: ACTIVITY_PER_PAGE,
+      search: activitySearch || undefined,
+      status: activityStatus === "all" ? undefined : activityStatus,
+    })
+      .then((response) => {
+        if (cancelled) return;
+        setRecentActivity(response.items);
+        setActivityPagination(response.pagination);
+        setActivityError(null);
+        if (response.pagination.page !== activityPage) {
+          setActivityPage(response.pagination.page);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setRecentActivity([]);
+        setActivityPagination(null);
+        setActivityError((err as Error).message);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setActivityLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activityPage, activitySearch, activityStatus, activityRefreshKey]);
 
   useEffect(() => {
     if (vehicles.length === 0) {
@@ -203,8 +266,33 @@ export default function Dashboard() {
     };
   }, [verifyVehicleId, verifyRefreshKey]);
 
-  const totalVehicles = vehicles.length;
-  const totalLogs = vehicles.reduce((sum, vehicle) => sum + (vehicle.logCount ?? 0), 0);
+  const totalVehicles = vehiclePagination?.total ?? vehicles.length;
+  const totalLogs = activityPagination?.total ?? vehicles.reduce((sum, vehicle) => sum + (vehicle.logCount ?? 0), 0);
+
+  const handleActivitySearchChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setActivitySearch(event.target.value);
+    setActivityPage(1);
+  };
+
+  const handleActivityStatusChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    setActivityStatus(event.target.value as ActivityStatusFilter);
+    setActivityPage(1);
+  };
+
+  const handleVehicleSearchChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setVehicleSearch(event.target.value);
+    setVehiclePage(1);
+  };
+
+  const currentVehiclePage = vehiclePagination?.page ?? vehiclePage;
+  const vehicleTotalPages = vehiclePagination?.totalPages ?? 0;
+  const canPreviousVehiclePage = currentVehiclePage > 1;
+  const canNextVehiclePage = vehicleTotalPages > 0 && currentVehiclePage < vehicleTotalPages;
+
+  const currentActivityPage = activityPagination?.page ?? activityPage;
+  const activityTotalPages = activityPagination?.totalPages ?? 0;
+  const canPreviousActivityPage = currentActivityPage > 1;
+  const canNextActivityPage = activityTotalPages > 0 && currentActivityPage < activityTotalPages;
 
   const handleVehicleSubmit = async (evt: FormEvent<HTMLFormElement>) => {
     evt.preventDefault();
@@ -222,12 +310,8 @@ export default function Dashboard() {
       setVehicleMessage(`Vehicle created. ID: ${res.id}`);
       setVehicleVin("");
       setVehicleMake("");
-      try {
-        await refreshDashboardData();
-        setDataError(null);
-      } catch (refreshErr) {
-        setDataError((refreshErr as Error).message);
-      }
+      setVehiclePage(1);
+      setVehiclesRefreshKey((key) => key + 1);
     } catch (err) {
       setVehicleMessage((err as Error).message);
     } finally {
@@ -257,26 +341,27 @@ export default function Dashboard() {
         .map((p) => p.trim())
         .filter(Boolean);
 
+      const performedBy = logPerformedBy.trim();
       const res = await createServiceLog({
         vehicleId: logVehicleId.trim(),
         summary: logSummary.trim(),
         mileage: Number(logMileage),
         parts: parts.length ? parts : undefined,
         docCid: logDocCid.trim() || undefined,
+        performedBy: performedBy || undefined,
       });
+      const actorLabel = res.performedBy ? ` • by ${res.performedBy}` : "";
       setLogMessage(
-        `Log added. Hash: ${res.hash.slice(0, 12)}… Merkle root: ${res.merkleRoot ?? "(pending)"}`
+        `Log added. Hash: ${res.hash.slice(0, 12)}… Merkle root: ${res.merkleRoot ?? "(pending)"}${actorLabel}`
       );
       setLogSummary("");
       setLogMileage("");
       setLogParts("");
       setLogDocCid("");
-      try {
-        await refreshDashboardData();
-        setDataError(null);
-      } catch (refreshErr) {
-        setDataError((refreshErr as Error).message);
-      }
+      setLogPerformedBy("");
+      setVehiclesRefreshKey((key) => key + 1);
+      setActivityPage(1);
+      setActivityRefreshKey((key) => key + 1);
       if (logVehicleId.trim() && logVehicleId.trim() === verifyVehicleId.trim()) {
         setVerifyRefreshKey((key) => key + 1);
       }
@@ -321,9 +406,14 @@ export default function Dashboard() {
         </nav>
       </header>
 
-      {dataError && (
+      {vehiclesError && (
+        <div className="mb-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          Failed to load vehicles: {vehiclesError}
+        </div>
+      )}
+      {activityError && (
         <div className="mb-6 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-          Failed to load dashboard data: {dataError}
+          Failed to load activity: {activityError}
         </div>
       )}
 
@@ -334,14 +424,14 @@ export default function Dashboard() {
             <span className="text-muted text-sm">Vehicles Tracked</span>
             <span className="text-emerald-500 text-xs px-2 py-1 rounded border border-emerald-500/30 bg-emerald-500/10">+18%</span>
           </div>
-          <div className="text-2xl font-bold">{loadingData ? "…" : formatNumber(totalVehicles)}</div>
+          <div className="text-2xl font-bold">{vehiclesLoading ? "…" : formatNumber(totalVehicles)}</div>
         </article>
         <article className="bg-[#0f0f12] border border-[#2a2a2f] rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
             <span className="text-muted text-sm">Verified Service Logs</span>
             <span className="text-emerald-500 text-xs px-2 py-1 rounded border border-emerald-500/30 bg-emerald-500/10">+6%</span>
           </div>
-          <div className="text-2xl font-bold">{loadingData ? "…" : formatNumber(totalLogs)}</div>
+          <div className="text-2xl font-bold">{activityLoading ? "…" : formatNumber(totalLogs)}</div>
         </article>
         <article className="bg-[#0f0f12] border border-[#2a2a2f] rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
@@ -366,7 +456,57 @@ export default function Dashboard() {
         <article className="bg-[#0f0f12] border border-[#2a2a2f] rounded-xl p-4">
           <div className="flex items-center justify-between mb-2">
             <div className="text-base font-semibold">Recent Activity</div>
-            <div className="text-xs text-muted">Latest {recentActivity.length} events</div>
+            <div className="flex items-center gap-2 text-xs text-muted">
+              <span>Page {currentActivityPage}</span>
+              {activityTotalPages > 0 && <span>of {activityTotalPages}</span>}
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 mb-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2">
+              <input
+                className="w-full sm:w-64 bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg placeholder:text-muted"
+                placeholder="Search summary, VIN, performer…"
+                value={activitySearch}
+                onChange={handleActivitySearchChange}
+              />
+              <select
+                className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
+                value={activityStatus}
+                onChange={handleActivityStatusChange}
+              >
+                {ACTIVITY_STATUS_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option === "all" ? "All statuses" : option}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <button
+                className="border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg hover:bg-red-500/10 disabled:opacity-50"
+                onClick={() => canPreviousActivityPage && setActivityPage((page) => Math.max(page - 1, 1))}
+                disabled={!canPreviousActivityPage || activityLoading}
+                type="button"
+              >
+                Prev
+              </button>
+              <button
+                className="border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg hover:bg-red-500/10 disabled:opacity-50"
+                onClick={() => canNextActivityPage && setActivityPage((page) => page + 1)}
+                disabled={!canNextActivityPage || activityLoading}
+                type="button"
+              >
+                Next
+              </button>
+              <button
+                className="border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg hover:bg-red-500/10 disabled:opacity-50"
+                onClick={() => setActivityRefreshKey((key) => key + 1)}
+                disabled={activityLoading}
+                type="button"
+              >
+                Refresh
+              </button>
+            </div>
           </div>
           <div className="overflow-auto">
             <table className="w-full border-collapse">
@@ -375,19 +515,19 @@ export default function Dashboard() {
                   <th className="text-left font-semibold px-3 py-2">Time</th>
                   <th className="text-left font-semibold px-3 py-2">VIN</th>
                   <th className="text-left font-semibold px-3 py-2">Event</th>
-                  <th className="text-left font-semibold px-3 py-2">By</th>
+                  <th className="text-left font-semibold px-3 py-2">Performed By</th>
                   <th className="text-left font-semibold px-3 py-2">Status</th>
                 </tr>
               </thead>
               <tbody>
-                {loadingData && recentActivity.length === 0 && (
+                {activityLoading && recentActivity.length === 0 && (
                   <tr className="border-t border-[#2a2a2f]">
                     <td colSpan={5} className="px-3 py-6 text-center text-muted text-sm">
                       Loading activity…
                     </td>
                   </tr>
                 )}
-                {!loadingData && recentActivity.length === 0 && (
+                {!activityLoading && recentActivity.length === 0 && (
                   <tr className="border-t border-[#2a2a2f]">
                     <td colSpan={5} className="px-3 py-6 text-center text-muted text-sm">
                       No service events yet. Log your first maintenance record to populate this feed.
@@ -397,6 +537,8 @@ export default function Dashboard() {
                 {recentActivity.map((item) => {
                   const badge = statusBadge(item.status);
                   const actor =
+                    item.performedBy ??
+                    metadataString(item.metadata, "performedBy") ??
                     metadataString(item.vehicle.metadata, "serviceCenter") ??
                     metadataString(item.vehicle.metadata, "actor") ??
                     metadataString(item.vehicle.metadata, "garage") ??
@@ -517,6 +659,15 @@ export default function Dashboard() {
                   onChange={(e) => setLogDocCid(e.target.value)}
                 />
               </label>
+              <label className="grid gap-1 text-sm">
+                <span className="text-muted">Performed by (optional)</span>
+                <input
+                  className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
+                  value={logPerformedBy}
+                  onChange={(e) => setLogPerformedBy(e.target.value)}
+                  placeholder="Garage or technician name"
+                />
+              </label>
               <button
                 className="bg-accent text-white px-3 py-2 rounded-lg hover:bg-red-500/90 disabled:opacity-50"
                 type="submit"
@@ -573,6 +724,7 @@ export default function Dashboard() {
                     {verifyLogs.map((log) => (
                       <option key={log.id} value={log.id}>
                         {new Date(log.createdAt).toLocaleString()} · {log.summary}
+                        {log.performedBy ? ` (${log.performedBy})` : ""}
                       </option>
                     ))}
                   </select>
@@ -631,13 +783,55 @@ export default function Dashboard() {
       <section className="bg-[#0f0f12] border border-[#2a2a2f] rounded-xl p-4">
         <div className="flex items-center justify-between mb-2">
           <div className="text-base font-semibold">My Garage</div>
-          <Link className="text-accent font-semibold hover:text-red-400" href="#">View all →</Link>
+          <div className="flex items-center gap-2 text-xs text-muted">
+            {vehiclePagination && vehiclePagination.total > 0 ? (
+              <span>
+                Page {currentVehiclePage} of {vehicleTotalPages || 1}
+              </span>
+            ) : (
+              <span>{formatNumber(totalVehicles)} vehicles</span>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
+          <input
+            className="w-full sm:w-64 bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg placeholder:text-muted"
+            placeholder="Search VIN, make, owner…"
+            value={vehicleSearch}
+            onChange={handleVehicleSearchChange}
+          />
+          <div className="flex items-center gap-2 text-xs">
+            <button
+              className="border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg hover:bg-red-500/10 disabled:opacity-50"
+              onClick={() => canPreviousVehiclePage && setVehiclePage((page) => Math.max(page - 1, 1))}
+              disabled={!canPreviousVehiclePage || vehiclesLoading}
+              type="button"
+            >
+              Prev
+            </button>
+            <button
+              className="border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg hover:bg-red-500/10 disabled:opacity-50"
+              onClick={() => canNextVehiclePage && setVehiclePage((page) => page + 1)}
+              disabled={!canNextVehiclePage || vehiclesLoading}
+              type="button"
+            >
+              Next
+            </button>
+            <button
+              className="border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg hover:bg-red-500/10 disabled:opacity-50"
+              onClick={() => setVehiclesRefreshKey((key) => key + 1)}
+              disabled={vehiclesLoading}
+              type="button"
+            >
+              Refresh
+            </button>
+          </div>
         </div>
         <div className="grid gap-2">
-          {loadingData && vehicles.length === 0 && (
+          {vehiclesLoading && vehicles.length === 0 && (
             <div className="text-sm text-muted">Loading vehicles…</div>
           )}
-          {!loadingData && vehicles.length === 0 && (
+          {!vehiclesLoading && vehicles.length === 0 && (
             <div className="text-sm text-muted">
               No vehicles registered yet. Use the form above to create one.
             </div>
@@ -646,13 +840,15 @@ export default function Dashboard() {
             const lastLogText = vehicle.lastLog
               ? formatRelativeTime(vehicle.lastLog.createdAt)
               : "—";
+            const performer = vehicle.lastLog?.performedBy ?? metadataString(vehicle.lastLog?.metadata, "performedBy");
             return (
-              <div key={vehicle.id} className="flex justify-between text-sm">
+              <div key={vehicle.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between text-sm gap-1 sm:gap-0">
                 <span>
                   VIN {truncateVin(vehicle.vin)} • {describeVehicle(vehicle.metadata)}
                 </span>
                 <span className="text-muted">
                   {formatNumber(vehicle.logCount)} logs • last: {lastLogText}
+                  {performer ? ` • by ${performer}` : ""}
                 </span>
               </div>
             );

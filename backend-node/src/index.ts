@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { MongoClient, ObjectId } from 'mongodb';
+import type { Filter, Document } from 'mongodb';
 import { z } from 'zod';
 import { canonicalJSONStringify, merkleProof, merkleRoot, sha256Hex, verifyProof } from './crypto';
 import type { LogDoc, VehicleDoc } from './types';
@@ -29,6 +30,28 @@ async function ensureDb(): Promise<void> {
   }
 }
 
+const MAX_PAGE_SIZE = 100;
+const LOG_STATUSES = new Set(['LOCAL', 'PENDING', 'ON_CHAIN', 'FAILED']);
+
+function clampPageSize(raw: unknown, fallback: number): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  const coerced = Math.trunc(parsed);
+  if (coerced <= 0) return fallback;
+  return Math.min(coerced, MAX_PAGE_SIZE);
+}
+
+function clampPage(raw: unknown, fallback: number): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  const coerced = Math.trunc(parsed);
+  return coerced >= 1 ? coerced : fallback;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Health
 app.get('/health', async (_req: Request, res: Response) => {
   try {
@@ -41,7 +64,14 @@ app.get('/health', async (_req: Request, res: Response) => {
 
 // Schemas
 const vehicleSchema = z.object({ vin: z.string().min(6), metadata: z.record(z.any()).optional() });
-const logSchema = z.object({ summary: z.string(), parts: z.array(z.string()).optional(), mileage: z.number().int().nonnegative(), docCid: z.string().optional() });
+const logSchema = z.object({
+  summary: z.string().min(1),
+  parts: z.array(z.string().min(1)).optional(),
+  mileage: z.number().int().nonnegative(),
+  docCid: z.string().min(1).optional(),
+  performedBy: z.string().min(1).max(120).optional(),
+  metadata: z.record(z.any()).optional(),
+});
 
 // Create vehicle
 app.post('/api/vehicles', async (req: Request, res: Response) => {
@@ -67,62 +97,89 @@ app.post('/api/vehicles', async (req: Request, res: Response) => {
 app.get('/api/vehicles', async (req: Request, res: Response) => {
   try {
     await ensureDb();
-    const rawLimit = Number(req.query.limit ?? 25);
-    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 100) : 25;
 
-    const vehicles = await getDb()
-      .collection<VehicleDoc>('vehicles')
-      .aggregate<Array<Record<string, any>>>([
-        { $sort: { createdAt: -1 } },
-        { $limit: limit },
-        {
-          $lookup: {
-            from: 'logs',
-            let: { vehicleId: '$_id' },
-            pipeline: [
-              { $match: { $expr: { $eq: ['$vehicleId', '$$vehicleId'] } } },
-              { $sort: { createdAt: -1 } },
-              {
-                $group: {
-                  _id: null,
-                  count: { $sum: 1 },
-                  lastLogAt: { $first: '$createdAt' },
-                  lastSummary: { $first: '$summary' },
-                  lastHash: { $first: '$hash' },
-                  lastStatus: { $first: '$status' },
-                  lastDocCid: { $first: '$docCid' },
-                  lastMileage: { $first: '$mileage' },
-                  lastId: { $first: '$_id' },
-                },
+    const page = clampPage(req.query.page ?? 1, 1);
+    const perPage = clampPageSize(req.query.perPage ?? req.query.limit ?? 25, 25);
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+
+    const filter: Document = {};
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), 'i');
+      filter.$or = [
+        { vin: regex },
+        { 'metadata.make': regex },
+        { 'metadata.model': regex },
+        { 'metadata.owner': regex },
+      ];
+    }
+
+    const vehicleCollection = getDb().collection<VehicleDoc>('vehicles');
+    const total = await vehicleCollection.countDocuments(filter as Filter<VehicleDoc>);
+    const totalPages = total === 0 ? 0 : Math.ceil(total / perPage);
+    const currentPage = totalPages === 0 ? 1 : Math.min(page, totalPages);
+    const skip = totalPages === 0 ? 0 : (currentPage - 1) * perPage;
+
+    const pipeline: Document[] = [];
+    if (Object.keys(filter).length > 0) {
+      pipeline.push({ $match: filter });
+    }
+    pipeline.push(
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: perPage },
+      {
+        $lookup: {
+          from: 'logs',
+          let: { vehicleId: '$_id' },
+          pipeline: [
+            { $match: { $expr: { $eq: ['$vehicleId', '$$vehicleId'] } } },
+            { $sort: { createdAt: -1 } },
+            {
+              $group: {
+                _id: null,
+                count: { $sum: 1 },
+                lastLogAt: { $first: '$createdAt' },
+                lastSummary: { $first: '$summary' },
+                lastHash: { $first: '$hash' },
+                lastStatus: { $first: '$status' },
+                lastDocCid: { $first: '$docCid' },
+                lastMileage: { $first: '$mileage' },
+                lastPerformedBy: { $first: '$performedBy' },
+                lastMetadata: { $first: '$metadata' },
+                lastId: { $first: '$_id' },
               },
-            ],
-            as: 'logStats',
-          },
-        },
-        { $addFields: { logStats: { $arrayElemAt: ['$logStats', 0] } } },
-        {
-          $addFields: {
-            logCount: { $ifNull: ['$logStats.count', 0] },
-            lastLog: {
-              $cond: [
-                { $gt: [{ $ifNull: ['$logStats.count', 0] }, 0] },
-                {
-                  _id: '$logStats.lastId',
-                  summary: '$logStats.lastSummary',
-                  createdAt: '$logStats.lastLogAt',
-                  status: '$logStats.lastStatus',
-                  hash: '$logStats.lastHash',
-                  docCid: '$logStats.lastDocCid',
-                  mileage: '$logStats.lastMileage',
-                },
-                null,
-              ],
             },
+          ],
+          as: 'logStats',
+        },
+      },
+      { $addFields: { logStats: { $arrayElemAt: ['$logStats', 0] } } },
+      {
+        $addFields: {
+          logCount: { $ifNull: ['$logStats.count', 0] },
+          lastLog: {
+            $cond: [
+              { $gt: [{ $ifNull: ['$logStats.count', 0] }, 0] },
+              {
+                _id: '$logStats.lastId',
+                summary: '$logStats.lastSummary',
+                createdAt: '$logStats.lastLogAt',
+                status: '$logStats.lastStatus',
+                hash: '$logStats.lastHash',
+                docCid: '$logStats.lastDocCid',
+                mileage: '$logStats.lastMileage',
+                performedBy: '$logStats.lastPerformedBy',
+                metadata: '$logStats.lastMetadata',
+              },
+              null,
+            ],
           },
         },
-        { $project: { logStats: 0 } },
-      ])
-      .toArray();
+      },
+      { $project: { logStats: 0 } },
+    );
+
+    const vehicles = await vehicleCollection.aggregate(pipeline).toArray();
 
     res.json({
       items: vehicles.map((v) => ({
@@ -144,9 +201,17 @@ app.get('/api/vehicles', async (req: Request, res: Response) => {
               hash: v.lastLog.hash,
               docCid: v.lastLog.docCid ?? null,
               mileage: v.lastLog.mileage ?? null,
+              performedBy: v.lastLog.performedBy ?? null,
+              metadata: v.lastLog.metadata ?? {},
             }
           : null,
       })),
+      pagination: {
+        page: currentPage,
+        perPage,
+        total,
+        totalPages,
+      },
     });
   } catch (err) {
     res.status(400).json({ error: String(err) });
@@ -183,6 +248,8 @@ app.get('/api/vehicles/:id', async (req: Request, res: Response) => {
         parts: l.parts ?? [],
         mileage: l.mileage,
         docCid: l.docCid ?? null,
+        performedBy: l.performedBy ?? null,
+        metadata: l.metadata ?? {},
         createdAt: l.createdAt.toISOString(),
         previousHash: l.previousHash ?? null,
         hash: l.hash,
@@ -204,7 +271,11 @@ app.post('/api/vehicles/:id/logs', async (req: Request, res: Response) => {
     const vehicle = await getDb().collection<VehicleDoc>('vehicles').findOne({ _id: vehicleId });
     if (!vehicle) return res.status(404).json({ error: 'vehicle not found' });
 
-    const body = logSchema.parse(req.body);
+    const payload = logSchema.parse(req.body);
+    const parts = payload.parts?.map((p) => p.trim()).filter(Boolean) ?? [];
+    const performedBy = payload.performedBy ? payload.performedBy.trim() : undefined;
+    const docCid = payload.docCid ? payload.docCid.trim() : undefined;
+    const metadata = payload.metadata ?? undefined;
 
     // previous hash (last log for this vehicle)
     const lastLog = await getDb()
@@ -219,16 +290,30 @@ app.post('/api/vehicles/:id/logs', async (req: Request, res: Response) => {
 
     const canonical = canonicalJSONStringify({
       vin: vehicle.vin,
-      summary: body.summary,
-      parts: body.parts ?? [],
-      mileage: body.mileage,
-      docCid: body.docCid ?? null,
+      summary: payload.summary,
+      parts,
+      mileage: payload.mileage,
+      docCid: docCid ?? null,
+      performedBy: performedBy ?? null,
+      metadata: metadata ?? {},
       previousHash,
       createdAt: createdAt.toISOString(),
     });
     const hash = sha256Hex(canonical);
 
-    const log: LogDoc = { vehicleId, ...body, createdAt, previousHash, hash, status: 'LOCAL' };
+    const log: LogDoc = {
+      vehicleId,
+      summary: payload.summary,
+      parts,
+      mileage: payload.mileage,
+      docCid,
+      performedBy,
+      metadata,
+      createdAt,
+      previousHash,
+      hash,
+      status: 'LOCAL',
+    };
     const r = await getDb().collection<LogDoc>('logs').insertOne(log);
 
     // recompute merkle root
@@ -251,6 +336,7 @@ app.post('/api/vehicles/:id/logs', async (req: Request, res: Response) => {
       previousHash,
       merkleRoot: root,
       createdAt: createdAt.toISOString(),
+      performedBy: performedBy ?? null,
     });
   } catch (err) {
     res.status(400).json({ error: String(err) });
@@ -261,23 +347,69 @@ app.post('/api/vehicles/:id/logs', async (req: Request, res: Response) => {
 app.get('/api/activity', async (req: Request, res: Response) => {
   try {
     await ensureDb();
-    const rawLimit = Number(req.query.limit ?? 10);
-    const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(Math.trunc(rawLimit), 1), 100) : 10;
 
-    const items = await getDb()
-      .collection<LogDoc>('logs')
-      .aggregate<Array<Record<string, any>>>([
-        { $sort: { createdAt: -1 } },
-        { $limit: limit },
-        {
-          $lookup: {
-            from: 'vehicles',
-            localField: 'vehicleId',
-            foreignField: '_id',
-            as: 'vehicle',
-          },
+    const page = clampPage(req.query.page ?? 1, 1);
+    const perPage = clampPageSize(req.query.perPage ?? req.query.limit ?? 10, 10);
+    const statusRaw = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : '';
+    const status = LOG_STATUSES.has(statusRaw) ? statusRaw : undefined;
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const vinQuery = typeof req.query.vin === 'string' ? req.query.vin.trim() : '';
+    const vehicleIdQuery = typeof req.query.vehicleId === 'string' ? req.query.vehicleId.trim() : '';
+
+    const basePipeline: Document[] = [];
+    const match: Document = {};
+    if (status) match.status = status;
+    if (vehicleIdQuery && ObjectId.isValid(vehicleIdQuery)) {
+      match.vehicleId = new ObjectId(vehicleIdQuery);
+    }
+    if (Object.keys(match).length > 0) {
+      basePipeline.push({ $match: match });
+    }
+
+    basePipeline.push(
+      {
+        $lookup: {
+          from: 'vehicles',
+          localField: 'vehicleId',
+          foreignField: '_id',
+          as: 'vehicle',
         },
-        { $unwind: '$vehicle' },
+      },
+      { $unwind: '$vehicle' },
+    );
+
+    if (vinQuery) {
+      const regex = new RegExp(escapeRegex(vinQuery), 'i');
+      basePipeline.push({ $match: { 'vehicle.vin': regex } });
+    }
+
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), 'i');
+      basePipeline.push({
+        $match: {
+          $or: [
+            { summary: regex },
+            { performedBy: regex },
+            { hash: regex },
+            { 'vehicle.vin': regex },
+          ],
+        },
+      });
+    }
+
+    const collection = getDb().collection<LogDoc>('logs');
+    const countResult = await collection.aggregate([...basePipeline, { $count: 'count' }]).toArray();
+    const total = countResult[0]?.count ?? 0;
+    const totalPages = total === 0 ? 0 : Math.ceil(total / perPage);
+    const currentPage = totalPages === 0 ? 1 : Math.min(page, totalPages);
+    const skip = totalPages === 0 ? 0 : (currentPage - 1) * perPage;
+
+    const items = await collection
+      .aggregate<Array<Record<string, any>>>([
+        ...basePipeline,
+        { $sort: { createdAt: -1 } },
+        { $skip: skip },
+        { $limit: perPage },
         {
           $project: {
             _id: 1,
@@ -287,6 +419,8 @@ app.get('/api/activity', async (req: Request, res: Response) => {
             status: 1,
             hash: 1,
             docCid: 1,
+            performedBy: 1,
+            metadata: 1,
             vehicle: {
               _id: '$vehicle._id',
               vin: '$vehicle.vin',
@@ -306,12 +440,20 @@ app.get('/api/activity', async (req: Request, res: Response) => {
         status: item.status,
         hash: item.hash,
         docCid: item.docCid ?? null,
+        performedBy: item.performedBy ?? null,
+        metadata: item.metadata ?? {},
         vehicle: {
           id: item.vehicle?._id?.toString(),
           vin: item.vehicle?.vin,
           metadata: item.vehicle?.metadata ?? {},
         },
       })),
+      pagination: {
+        page: currentPage,
+        perPage,
+        total,
+        totalPages,
+      },
     });
   } catch (err) {
     res.status(400).json({ error: String(err) });

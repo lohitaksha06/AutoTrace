@@ -16,6 +16,8 @@ export type LogDoc = {
   parts?: string[];
   mileage: number;
   docCid?: string;
+  performedBy?: string;
+  metadata?: Record<string, unknown>;
   createdAt: Date;
   previousHash?: string | null;
   hash: string;
