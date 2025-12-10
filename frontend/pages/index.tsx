@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import {
   ActivityItem,
   Pagination,
@@ -106,7 +106,29 @@ function statusBadge(status: string | null | undefined) {
 const VEHICLES_PER_PAGE = 5;
 const ACTIVITY_PER_PAGE = 10;
 const ACTIVITY_STATUS_OPTIONS = ["all", "ON_CHAIN", "PENDING", "LOCAL", "FAILED"] as const;
+const VEHICLE_ROLE_OPTIONS = ["all", "owner", "garage", "dealer", "admin"] as const;
 type ActivityStatusFilter = (typeof ACTIVITY_STATUS_OPTIONS)[number];
+type VehicleRoleFilter = (typeof VEHICLE_ROLE_OPTIONS)[number];
+
+function extractRole(metadata: Record<string, unknown> | undefined): string | null {
+  if (!metadata) return null;
+  const candidateKeys = [
+    "role",
+    "ownerRole",
+    "owner_role",
+    "ownerType",
+    "owner_type",
+    "type",
+    "category",
+  ];
+  for (const key of candidateKeys) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim().toLowerCase();
+    }
+  }
+  return null;
+}
 
 export default function Dashboard() {
   const [vehicleVin, setVehicleVin] = useState("");
@@ -136,6 +158,7 @@ export default function Dashboard() {
   const [vehiclesLoading, setVehiclesLoading] = useState(true);
   const [vehiclesError, setVehiclesError] = useState<string | null>(null);
   const [vehiclesRefreshKey, setVehiclesRefreshKey] = useState(0);
+  const [vehicleRoleFilter, setVehicleRoleFilter] = useState<VehicleRoleFilter>("all");
 
   const [recentActivity, setRecentActivity] = useState<ActivityItem[]>([]);
   const [activityPage, setActivityPage] = useState(1);
@@ -150,6 +173,19 @@ export default function Dashboard() {
   const [verifyLogsLoading, setVerifyLogsLoading] = useState(false);
   const [verifyLogsError, setVerifyLogsError] = useState<string | null>(null);
   const [verifyRefreshKey, setVerifyRefreshKey] = useState(0);
+
+  const filteredVehicles = useMemo(() => {
+    if (vehicleRoleFilter === "all") {
+      return vehicles;
+    }
+    return vehicles.filter((vehicle) => {
+      const vehicleRole = extractRole(vehicle.metadata);
+      if (vehicleRole && vehicleRole.includes(vehicleRoleFilter)) return true;
+      const lastLogRole = extractRole(vehicle.lastLog?.metadata ?? undefined);
+      if (lastLogRole && lastLogRole.includes(vehicleRoleFilter)) return true;
+      return false;
+    });
+  }, [vehicleRoleFilter, vehicles]);
 
   useEffect(() => {
     let cancelled = false;
@@ -219,16 +255,24 @@ export default function Dashboard() {
   }, [activityPage, activitySearch, activityStatus, activityRefreshKey]);
 
   useEffect(() => {
-    if (vehicles.length === 0) {
+    if (filteredVehicles.length === 0) {
       setLogVehicleId("");
       setVerifyVehicleId("");
       setVerifyLogs([]);
       setVerifyLogId("");
       return;
     }
-    setLogVehicleId((current) => current || vehicles[0].id);
-    setVerifyVehicleId((current) => current || vehicles[0].id);
-  }, [vehicles]);
+    setLogVehicleId((current) =>
+      current && filteredVehicles.some((vehicle) => vehicle.id === current)
+        ? current
+        : filteredVehicles[0].id,
+    );
+    setVerifyVehicleId((current) =>
+      current && filteredVehicles.some((vehicle) => vehicle.id === current)
+        ? current
+        : filteredVehicles[0].id,
+    );
+  }, [filteredVehicles]);
 
   useEffect(() => {
     if (!verifyVehicleId) {
@@ -277,6 +321,11 @@ export default function Dashboard() {
   const handleActivityStatusChange = (event: ChangeEvent<HTMLSelectElement>) => {
     setActivityStatus(event.target.value as ActivityStatusFilter);
     setActivityPage(1);
+  };
+
+  const handleVehicleRoleChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    setVehicleRoleFilter(event.target.value as VehicleRoleFilter);
+    setVehiclePage(1);
   };
 
   const handleVehicleSearchChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -600,14 +649,14 @@ export default function Dashboard() {
             <form className="grid gap-2" onSubmit={handleLogSubmit}>
               <label className="grid gap-1 text-sm">
                 <span className="text-muted">Vehicle</span>
-                {vehicles.length > 0 ? (
+                {filteredVehicles.length > 0 ? (
                   <select
                     className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
                     value={logVehicleId}
                     onChange={(e) => setLogVehicleId(e.target.value)}
                     required
                   >
-                    {vehicles.map((vehicle) => (
+                    {filteredVehicles.map((vehicle) => (
                       <option key={vehicle.id} value={vehicle.id}>
                         {truncateVin(vehicle.vin)} · {describeVehicle(vehicle.metadata)}
                       </option>
@@ -623,6 +672,9 @@ export default function Dashboard() {
                   />
                 )}
               </label>
+              {filteredVehicles.length === 0 && vehicles.length > 0 && (
+                <div className="text-xs text-muted">Adjust the role filter above or enter a vehicle ID manually.</div>
+              )}
               <label className="grid gap-1 text-sm">
                 <span className="text-muted">Summary</span>
                 <input
@@ -689,14 +741,14 @@ export default function Dashboard() {
             <form className="grid gap-2" onSubmit={handleVerifySubmit}>
               <label className="grid gap-1 text-sm">
                 <span className="text-muted">Vehicle</span>
-                {vehicles.length > 0 ? (
+                {filteredVehicles.length > 0 ? (
                   <select
                     className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg"
                     value={verifyVehicleId}
                     onChange={(e) => setVerifyVehicleId(e.target.value)}
                     required
                   >
-                    {vehicles.map((vehicle) => (
+                    {filteredVehicles.map((vehicle) => (
                       <option key={vehicle.id} value={vehicle.id}>
                         {truncateVin(vehicle.vin)} · {describeVehicle(vehicle.metadata)}
                       </option>
@@ -712,6 +764,9 @@ export default function Dashboard() {
                   />
                 )}
               </label>
+              {filteredVehicles.length === 0 && vehicles.length > 0 && (
+                <div className="text-xs text-muted">Adjust the role filter above or enter a vehicle ID manually.</div>
+              )}
               <label className="grid gap-1 text-sm">
                 <span className="text-muted">Log</span>
                 {verifyLogs.length > 0 ? (
@@ -794,12 +849,25 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-3">
-          <input
-            className="w-full sm:w-64 bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg placeholder:text-muted"
-            placeholder="Search VIN, make, owner…"
-            value={vehicleSearch}
-            onChange={handleVehicleSearchChange}
-          />
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              className="w-full sm:w-64 bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg placeholder:text-muted"
+              placeholder="Search VIN, make, owner…"
+              value={vehicleSearch}
+              onChange={handleVehicleSearchChange}
+            />
+            <select
+              className="bg-[#0b0c10] border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg sm:w-48"
+              value={vehicleRoleFilter}
+              onChange={handleVehicleRoleChange}
+            >
+              {VEHICLE_ROLE_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option === "all" ? "All roles" : option.charAt(0).toUpperCase() + option.slice(1)}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="flex items-center gap-2 text-xs">
             <button
               className="border border-[#2a2a2f] text-fg px-3 py-2 rounded-lg hover:bg-red-500/10 disabled:opacity-50"
@@ -836,7 +904,12 @@ export default function Dashboard() {
               No vehicles registered yet. Use the form above to create one.
             </div>
           )}
-          {vehicles.map((vehicle) => {
+          {!vehiclesLoading && vehicles.length > 0 && filteredVehicles.length === 0 && (
+            <div className="text-sm text-muted">
+              No vehicles match this role filter on the current page.
+            </div>
+          )}
+          {filteredVehicles.map((vehicle) => {
             const lastLogText = vehicle.lastLog
               ? formatRelativeTime(vehicle.lastLog.createdAt)
               : "—";
