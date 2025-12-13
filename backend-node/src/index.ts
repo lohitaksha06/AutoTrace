@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { canonicalJSONStringify, merkleProof, merkleRoot, sha256Hex, verifyProof } from './crypto';
 import type { LogDoc, VehicleDoc } from './types';
 
-const app = express();
+export const app = express();
 app.use(cors());
 app.use(express.json());
 
@@ -17,9 +17,9 @@ const DB_NAME = process.env.DB_NAME || 'autotrace';
 const client = new MongoClient(MONGO_URI);
 let connected = false;
 
-function getDb() { return client.db(DB_NAME); }
+export function getDb() { return client.db(DB_NAME); }
 
-async function ensureDb(): Promise<void> {
+export async function ensureDb(): Promise<void> {
   if (!connected) {
     await client.connect();
     // warm indexes
@@ -27,6 +27,22 @@ async function ensureDb(): Promise<void> {
     await d.collection('logs').createIndex({ vehicleId: 1, createdAt: 1 });
     await d.collection('vehicles').createIndex({ vin: 1 }, { unique: true });
     connected = true;
+  }
+}
+
+export async function clearDatabase(): Promise<void> {
+  await ensureDb();
+  const db = getDb();
+  await Promise.all([
+    db.collection('logs').deleteMany({}),
+    db.collection('vehicles').deleteMany({}),
+  ]);
+}
+
+export async function disconnectDb(): Promise<void> {
+  if (connected) {
+    await client.close();
+    connected = false;
   }
 }
 
@@ -585,5 +601,7 @@ app.get('/api/vehicles/:id/verify', async (req: Request, res: Response) => {
   }
 });
 
-const PORT = Number(process.env.PORT || 4000);
-app.listen(PORT, () => console.log(`[autotrace] api listening on :${PORT}`));
+if (process.env.NODE_ENV !== 'test') {
+  const PORT = Number(process.env.PORT || 4000);
+  app.listen(PORT, () => console.log(`[autotrace] api listening on :${PORT}`));
+}
