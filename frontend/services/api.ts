@@ -88,6 +88,7 @@ export type ListVehiclesParams = {
   page?: number;
   perPage?: number;
   search?: string;
+  role?: string;
 };
 
 export type ListVehiclesResponse = {

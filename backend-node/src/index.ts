@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { MongoClient, ObjectId } from 'mongodb';
-import type { Filter, Document } from 'mongodb';
+import type { Document } from 'mongodb';
 import { z } from 'zod';
 import { canonicalJSONStringify, merkleProof, merkleRoot, sha256Hex, verifyProof } from './crypto';
 import type { LogDoc, VehicleDoc } from './types';
@@ -101,6 +101,8 @@ app.get('/api/vehicles', async (req: Request, res: Response) => {
     const page = clampPage(req.query.page ?? 1, 1);
     const perPage = clampPageSize(req.query.perPage ?? req.query.limit ?? 25, 25);
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const roleFilterRaw = typeof req.query.role === 'string' ? req.query.role.trim().toLowerCase() : '';
+    const roleFilter = roleFilterRaw && roleFilterRaw !== 'all' ? roleFilterRaw : null;
 
     const filter: Document = {};
     if (search) {
@@ -114,19 +116,13 @@ app.get('/api/vehicles', async (req: Request, res: Response) => {
     }
 
     const vehicleCollection = getDb().collection<VehicleDoc>('vehicles');
-    const total = await vehicleCollection.countDocuments(filter as Filter<VehicleDoc>);
-    const totalPages = total === 0 ? 0 : Math.ceil(total / perPage);
-    const currentPage = totalPages === 0 ? 1 : Math.min(page, totalPages);
-    const skip = totalPages === 0 ? 0 : (currentPage - 1) * perPage;
 
-    const pipeline: Document[] = [];
+    const basePipeline: Document[] = [];
     if (Object.keys(filter).length > 0) {
-      pipeline.push({ $match: filter });
+      basePipeline.push({ $match: filter });
     }
-    pipeline.push(
-      { $sort: { createdAt: -1 } },
-      { $skip: skip },
-      { $limit: perPage },
+
+    basePipeline.push(
       {
         $lookup: {
           from: 'logs',
@@ -156,30 +152,124 @@ app.get('/api/vehicles', async (req: Request, res: Response) => {
       { $addFields: { logStats: { $arrayElemAt: ['$logStats', 0] } } },
       {
         $addFields: {
-          logCount: { $ifNull: ['$logStats.count', 0] },
-          lastLog: {
-            $cond: [
-              { $gt: [{ $ifNull: ['$logStats.count', 0] }, 0] },
+          roleCandidates: {
+            $setUnion: [
               {
-                _id: '$logStats.lastId',
-                summary: '$logStats.lastSummary',
-                createdAt: '$logStats.lastLogAt',
-                status: '$logStats.lastStatus',
-                hash: '$logStats.lastHash',
-                docCid: '$logStats.lastDocCid',
-                mileage: '$logStats.lastMileage',
-                performedBy: '$logStats.lastPerformedBy',
-                metadata: '$logStats.lastMetadata',
+                $map: {
+                  input: {
+                    $filter: {
+                      input: [
+                        '$metadata.role',
+                        '$metadata.ownerRole',
+                        '$metadata.owner_role',
+                        '$metadata.ownerType',
+                        '$metadata.owner_type',
+                        '$metadata.type',
+                        '$metadata.category',
+                      ],
+                      as: 'val',
+                      cond: {
+                        $and: [
+                          { $ne: ['$$val', null] },
+                          { $eq: [{ $type: '$$val' }, 'string'] },
+                          { $gt: [{ $strLenCP: { $trim: { input: '$$val' } } }, 0] },
+                        ],
+                      },
+                    },
+                  },
+                  as: 'val',
+                  in: { $toLower: { $trim: { input: '$$val' } } },
+                },
               },
-              null,
+              {
+                $map: {
+                  input: {
+                    $filter: {
+                      input: [
+                        '$logStats.lastMetadata.role',
+                        '$logStats.lastMetadata.ownerRole',
+                        '$logStats.lastMetadata.owner_role',
+                        '$logStats.lastMetadata.ownerType',
+                        '$logStats.lastMetadata.owner_type',
+                        '$logStats.lastMetadata.type',
+                        '$logStats.lastMetadata.category',
+                      ],
+                      as: 'val',
+                      cond: {
+                        $and: [
+                          { $ne: ['$$val', null] },
+                          { $eq: [{ $type: '$$val' }, 'string'] },
+                          { $gt: [{ $strLenCP: { $trim: { input: '$$val' } } }, 0] },
+                        ],
+                      },
+                    },
+                  },
+                  as: 'val',
+                  in: { $toLower: { $trim: { input: '$$val' } } },
+                },
+              },
             ],
           },
         },
       },
-      { $project: { logStats: 0 } },
     );
 
-    const vehicles = await vehicleCollection.aggregate(pipeline).toArray();
+    if (roleFilter) {
+      basePipeline.push({
+        $match: {
+          $expr: {
+            $anyElementTrue: {
+              $map: {
+                input: { $ifNull: ['$roleCandidates', []] },
+                as: 'candidate',
+                in: {
+                  $gte: [{ $strIndexOfCP: ['$$candidate', roleFilter] }, 0],
+                },
+              },
+            },
+          },
+        },
+      });
+    }
+
+    const countPipeline = [...basePipeline, { $count: 'count' }];
+    const countResult = await vehicleCollection.aggregate(countPipeline).toArray();
+    const total = countResult[0]?.count ?? 0;
+    const totalPages = total === 0 ? 0 : Math.ceil(total / perPage);
+    const currentPage = totalPages === 0 ? 1 : Math.min(page, totalPages);
+    const skip = totalPages === 0 ? 0 : (currentPage - 1) * perPage;
+
+    const vehicles = await vehicleCollection
+      .aggregate([
+        ...basePipeline,
+        { $sort: { createdAt: -1 } },
+        { $skip: skip },
+        { $limit: perPage },
+        {
+          $addFields: {
+            logCount: { $ifNull: ['$logStats.count', 0] },
+            lastLog: {
+              $cond: [
+                { $gt: [{ $ifNull: ['$logStats.count', 0] }, 0] },
+                {
+                  _id: '$logStats.lastId',
+                  summary: '$logStats.lastSummary',
+                  createdAt: '$logStats.lastLogAt',
+                  status: '$logStats.lastStatus',
+                  hash: '$logStats.lastHash',
+                  docCid: '$logStats.lastDocCid',
+                  mileage: '$logStats.lastMileage',
+                  performedBy: '$logStats.lastPerformedBy',
+                  metadata: '$logStats.lastMetadata',
+                },
+                null,
+              ],
+            },
+          },
+        },
+        { $project: { logStats: 0, roleCandidates: 0 } },
+      ])
+      .toArray();
 
     res.json({
       items: vehicles.map((v) => ({

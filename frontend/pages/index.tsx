@@ -194,6 +194,7 @@ export default function Dashboard() {
       page: vehiclePage,
       perPage: VEHICLES_PER_PAGE,
       search: vehicleSearch || undefined,
+      role: vehicleRoleFilter === "all" ? undefined : vehicleRoleFilter,
     })
       .then((response) => {
         if (cancelled) return;
@@ -218,7 +219,7 @@ export default function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, [vehiclePage, vehicleSearch, vehiclesRefreshKey]);
+  }, [vehiclePage, vehicleSearch, vehicleRoleFilter, vehiclesRefreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -672,7 +673,7 @@ export default function Dashboard() {
                   />
                 )}
               </label>
-              {filteredVehicles.length === 0 && vehicles.length > 0 && (
+              {vehicleRoleFilter !== "all" && !vehiclesLoading && filteredVehicles.length === 0 && (
                 <div className="text-xs text-muted">Adjust the role filter above or enter a vehicle ID manually.</div>
               )}
               <label className="grid gap-1 text-sm">
@@ -764,7 +765,7 @@ export default function Dashboard() {
                   />
                 )}
               </label>
-              {filteredVehicles.length === 0 && vehicles.length > 0 && (
+              {vehicleRoleFilter !== "all" && !vehiclesLoading && filteredVehicles.length === 0 && (
                 <div className="text-xs text-muted">Adjust the role filter above or enter a vehicle ID manually.</div>
               )}
               <label className="grid gap-1 text-sm">
@@ -901,12 +902,9 @@ export default function Dashboard() {
           )}
           {!vehiclesLoading && vehicles.length === 0 && (
             <div className="text-sm text-muted">
-              No vehicles registered yet. Use the form above to create one.
-            </div>
-          )}
-          {!vehiclesLoading && vehicles.length > 0 && filteredVehicles.length === 0 && (
-            <div className="text-sm text-muted">
-              No vehicles match this role filter on the current page.
+              {vehicleRoleFilter === "all"
+                ? "No vehicles registered yet. Use the form above to create one."
+                : "No vehicles match this role filter. Try a different role to see more vehicles."}
             </div>
           )}
           {filteredVehicles.map((vehicle) => {
